@@ -1,6 +1,20 @@
 import os
 import sys
 import logging
+
+# 在导入其他库之前设置环境变量，解决 SSL 证书问题
+os.environ["TOKENIZERS_PARALLELISM"] = "false"
+# 配置 HuggingFace 镜像源（使用国内镜像加速下载，避免 SSL 问题）
+os.environ["HF_ENDPOINT"] = "https://hf-mirror.com"
+
+# 尝试设置 SSL 证书路径
+try:
+    import certifi
+    os.environ["SSL_CERT_FILE"] = certifi.where()
+    os.environ["REQUESTS_CA_BUNDLE"] = certifi.where()
+except ImportError:
+    pass  # certifi 可能未安装，继续执行
+
 from openai import OpenAI
 from typing import Any, Generator
 from llama_index.core import VectorStoreIndex, SimpleDirectoryReader, Settings
@@ -81,7 +95,10 @@ class DeepSeekChat(BaseModel):
     def _stream_response(self, response) -> Generator[str, None, None]:
         """处理流式响应，逐块生成内容。"""
         for chunk in response:
-            if chunk.choices[0].delta.content is not None:
+            if (chunk.choices and 
+                len(chunk.choices) > 0 and 
+                chunk.choices[0].delta and 
+                chunk.choices[0].delta.content is not None):
                 yield chunk.choices[0].delta.content
 
 class DeepSeekLLM(CustomLLM):
@@ -119,8 +136,6 @@ class DeepSeekLLM(CustomLLM):
 
         return response_generator()
 
-# 设置环境变量，禁用 tokenizers 的并行处理，以避免潜在的死锁问题
-os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
 def main():
     """主程序函数，演示如何使用 DeepSeekLLM 进行文档查询。"""
@@ -129,7 +144,17 @@ def main():
 
     # 设置 LLM 和嵌入模型
     Settings.llm = DeepSeekLLM()
-    Settings.embed_model = HuggingFaceEmbedding(model_name="BAAI/bge-base-zh-v1.5")
+    
+    # 尝试加载嵌入模型，如果失败则提供提示
+    try:
+        Settings.embed_model = HuggingFaceEmbedding(model_name="BAAI/bge-base-zh-v1.5")
+    except Exception as e:
+        logger.error(f"无法加载 HuggingFace 模型: {e}")
+        logger.error("可能的解决方案：")
+        logger.error("1. 检查网络连接")
+        logger.error("2. 运行: /Applications/Python\\ 3.12/Install\\ Certificates.command")
+        logger.error("3. 或使用镜像源: export HF_ENDPOINT=https://hf-mirror.com")
+        raise
 
     # 创建索引和查询引擎
     index = VectorStoreIndex.from_documents(documents)
@@ -137,17 +162,19 @@ def main():
 
     # 执行查询
     print("查询结果：")
-    response = query_engine.query("作者学习过的编程语言有哪些？")
+    response = query_engine.query("ai写小说是否可行？")
 
     # 处理并输出响应
-    if hasattr(response, "response_gen"):
+    if hasattr(response, "print_response_stream"):
+        # 使用内置的流式输出方法（推荐）
+        response.print_response_stream()
+    elif hasattr(response, "response_gen"):
         # 流式输出
         for text in response.response_gen:
             print(text, end="", flush=True)
-            sys.stdout.flush()  # 确保立即输出
     else:
         # 非流式输出
-        print(response.response, end="", flush=True)
+        print(response.response if hasattr(response, "response") else str(response), end="", flush=True)
 
     print("\n 查询完成")
 
